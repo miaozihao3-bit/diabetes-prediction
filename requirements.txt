@@ -3,3 +3,5 @@ scikit-learn
 joblib
 skl2onnx
 onnxruntime
+fastapi
+uvicorn
