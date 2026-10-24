@@ -12,15 +12,20 @@ ZERO_IS_MISSING = [1, 2, 3, 4, 5]
 
 
 class PatientFeatures(BaseModel):
-    """一次预测请求。字段顺序必须与训练时的特征列顺序一致。"""
-    pregnancies: float
-    glucose: float
-    blood_pressure: float
-    skin_thickness: float
-    insulin: float
-    bmi: float
-    diabetes_pedigree: float
-    age: float
+    """一次预测请求。字段顺序必须与训练时的特征列顺序一致。
+
+    每列都加了范围校验：类型合法但数值荒谬的输入（如 -999）会被挡在门口，
+    避免它一路静默算出一个错误概率。
+    注意 ge=0 是刻意的——这些列里的 0 表示"没测到"，是合法输入。
+    """
+    pregnancies: float = Field(ge=0.0, le=20, description="怀孕次数")
+    glucose: float = Field(ge=0.0, le=600, description="血糖值（mg/dL）")
+    blood_pressure: float = Field(ge=0.0, le=250, description="舒张压（mm Hg）")
+    skin_thickness: float = Field(ge=0.0, le=100, description="皮褶厚度（mm）")
+    insulin: float = Field(ge=0.0, le=1000, description="胰岛素（μU/mL）")
+    bmi: float = Field(ge=0.0, le=100, description="体质指数")
+    diabetes_pedigree: float = Field(ge=0.0, le=10, description="糖尿病家族遗传函数")
+    age: float = Field(ge=0.0, le=120, description="年龄（岁）")
     # 阈值做成请求参数：业务方（比如医生）可以不改代码就调整"宁可误报"的程度
     threshold: float = Field(0.5, ge=0.0, le=1.0, description="判定为患病的概率阈值")
 
