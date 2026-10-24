@@ -1,0 +1,9 @@
+# 运行服务用不到的，全部挡在镜像外
+.git
+.gitignore
+data/
+train/
+export/
+__pycache__/
+*.pyc
+*.pkl
