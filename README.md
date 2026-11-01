@@ -67,6 +67,39 @@ curl -X POST http://127.0.0.1:8000/predict \
 
 输入字段带有范围校验（见 `api/main.py`），类型合法但数值荒谬的请求（如血糖 -999）会返回 `422`。
 
+## 运维接口
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+```json
+{
+  "status": "ok",
+  "model": "model/model.onnx",
+  "model_version": "178dee3dfc20",
+  "model_modified": "2026-10-14T20:34:14",
+  "loaded_at": "2026-10-24T18:23:25"
+}
+```
+
+`model_version` 是模型文件的 sha256 前 12 位。**替换模型后如果这个值没变，说明服务还在用旧模型**
+（uvicorn 的 `--reload` 只监听 `.py`，不会因 `.onnx` 变化而重启）。
+
+每次响应都会带两个头：
+
+| 响应头 | 含义 |
+|---|---|
+| `X-Request-ID` | 本次请求的唯一 ID，也写在服务日志里，便于排查 |
+| `X-Process-Time` | 服务端处理耗时 |
+
+服务日志示例：
+
+```
+INFO diabetes-api - POST /predict -> 200 rid=f297e72ddea7 1.9ms
+INFO diabetes-api - predict proba=0.705812 threshold=0.50 prediction=1 2.9ms
+```
+
 ## 本地开发（不用 Docker）
 
 ```powershell
@@ -143,7 +176,7 @@ diabetes-prediction/
 - **阈值**：目前默认 0.5，未按医疗场景的召回要求调优。应基于验证集选取阈值，
   并同时报告 recall / precision。
 - **缺失值**：`insulin` 约 48.7% 为 0，中位数填补会稀释该列信息，可考虑丢弃或做缺失指示特征。
-- **工程**：服务尚无鉴权、限流、结构化日志与异常兜底（下一步）。
+- **工程**：已有健康检查、请求 ID、处理耗时与异常兜底；尚未做鉴权、限流、日志采集与模型灰度。
 
 ## 技术栈
 

@@ -1,10 +1,29 @@
-"""糖尿病预测 - FastAPI 推理服务（ONNX Runtime）"""
+"""糖尿病预测 - FastAPI 推理服务（ONNX Runtime）
+
+工程细节：
+- 启动时加载一次模型，并记录模型指纹（sha256）与加载时间，/health 可查
+- 每个请求带 X-Request-ID 与 X-Process-Time 响应头，并写一行日志
+- 模型加载失败：启动即报错（不带着坏模型对外服务）
+- 推理异常：返回干净的 500，不把堆栈甩给调用方
+"""
+import hashlib
+import logging
+import os
+import time
+import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 import numpy as np
 import onnxruntime as ort
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+)
+logger = logging.getLogger("diabetes-api")
 
 MODEL_PATH = "model/model.onnx"
 # 边界约定（与 train.py / export_onnx.py 一致）：这些列里的 0 表示"没测到"，要换成 NaN
@@ -38,17 +57,60 @@ class Prediction(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 服务启动时加载一次 ONNX（推理全程不依赖 sklearn）
-    app.state.session = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+    # 启动时加载一次。加载失败就让启动失败——绝不能带着坏模型对外服务
+    try:
+        app.state.session = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+    except Exception:
+        logger.exception("模型加载失败: %s", MODEL_PATH)
+        raise
+
     app.state.input_name = app.state.session.get_inputs()[0].name
+    with open(MODEL_PATH, "rb") as f:
+        app.state.model_version = hashlib.sha256(f.read()).hexdigest()[:12]
+    app.state.loaded_at = datetime.now().isoformat(timespec="seconds")
+
+    logger.info("模型已加载: %s (version=%s)", MODEL_PATH, app.state.model_version)
     yield
+    logger.info("服务正在停止")
 
 
 app = FastAPI(title="糖尿病预测服务", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def add_request_headers(request: Request, call_next):
+    """给每个响应加上请求 ID 与耗时，并记录一行访问日志。"""
+    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
+    start = time.perf_counter()
+    response = await call_next(request)
+    cost_ms = (time.perf_counter() - start) * 1000
+
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Process-Time"] = f"{cost_ms:.1f}ms"
+    logger.info(
+        "%s %s -> %d rid=%s %.1fms",
+        request.method, request.url.path, response.status_code, request_id, cost_ms,
+    )
+    return response
+
+
+@app.get("/health")
+def health():
+    """健康检查：顺便暴露当前加载的模型版本，避免"静默跑旧模型"。"""
+    stat = os.stat(MODEL_PATH)
+    return {
+        "status": "ok",
+        "model": MODEL_PATH,
+        "model_version": app.state.model_version,
+        "model_modified": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+        "loaded_at": app.state.loaded_at,
+    }
+
+
 @app.post("/predict", response_model=Prediction)
 def predict(req: PatientFeatures):
+    t0 = time.perf_counter()
+
     # 1) 按训练时的列序组装成 (1, 8) 的 float32 张量
     x = np.array([[
         req.pregnancies, req.glucose, req.blood_pressure, req.skin_thickness,
@@ -60,11 +122,22 @@ def predict(req: PatientFeatures):
     x[:, ZERO_IS_MISSING] = np.where(x[:, ZERO_IS_MISSING] == 0, np.nan, x[:, ZERO_IS_MISSING])
 
     # 3) 推理：取出正类（患病）概率
-    proba = float(app.state.session.run(None, {app.state.input_name: x})[1][0, 1])
+    try:
+        proba = float(app.state.session.run(None, {app.state.input_name: x})[1][0, 1])
+    except Exception:
+        # 记录完整堆栈给运维，但只把一句人话返回给调用方
+        logger.exception("推理失败")
+        raise HTTPException(status_code=500, detail="模型推理失败，请稍后重试")
 
     # 4) 用请求里的阈值判定（默认 0.5）
+    prediction = int(proba >= req.threshold)
+    logger.info(
+        "predict proba=%.6f threshold=%.2f prediction=%d %.1fms",
+        proba, req.threshold, prediction, (time.perf_counter() - t0) * 1000,
+    )
+
     return Prediction(
         probability=proba,
-        prediction=int(proba >= req.threshold),
+        prediction=prediction,
         threshold=req.threshold,
     )
